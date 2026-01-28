@@ -1,35 +1,26 @@
-# Copyright 2020 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Production Dockerfile (recreated) - loadgenerator (Locust)
 
-FROM python:3.11.1-slim@sha256:33a1008485e1a2dc565be79ece483b240cbc4d6266d6144a57a5a9965ede9bbf as base
+FROM python:3.11-slim
 
-FROM base as builder
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+RUN addgroup --system app && adduser --system --ingroup app app
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --prefix="/install" -r requirements.txt
+COPY . .
 
-FROM base
+# Locust web UI defaults to 8089
+EXPOSE 8089
+USER app
 
-WORKDIR /loadgen
+# FRONTEND_ADDR is injected via K8s env; default points to frontend service
+ENV FRONTEND_ADDR=frontend:80 \
+    USERS=10 \
+    SPAWN_RATE=1
 
-COPY --from=builder /install /usr/local
+ENTRYPOINT ["sh","-c","locust -f locustfile.py --host=http://${FRONTEND_ADDR} --headless -u ${USERS} -r ${SPAWN_RATE}"]
 
-# Add application code.
-COPY locustfile.py .
-
-# enable gevent support in debugger
-ENV GEVENT_SUPPORT=True
-
-ENTRYPOINT locust --host="http://${FRONTEND_ADDR}" --headless -u "${USERS:-10}" 2>&1

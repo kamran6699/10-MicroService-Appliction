@@ -1,0 +1,142 @@
+name: CI/CD (Docker + Kubernetes + Terraform)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: 10-microservice-appliction
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: adservice
+            context: src/adservice
+            dockerfile: Dockerfile
+          - name: cartservice
+            context: src/cartservice/src
+            dockerfile: Dockerfile
+          - name: checkoutservice
+            context: src/checkoutservice
+            dockerfile: Dockerfile
+          - name: currencyservice
+            context: src/currencyservice
+            dockerfile: Dockerfile
+          - name: emailservice
+            context: src/emailservice
+            dockerfile: Dockerfile
+          - name: frontend
+            context: src/frontend
+            dockerfile: Dockerfile
+          - name: loadgenerator
+            context: src/loadgenerator
+            dockerfile: Dockerfile
+          - name: paymentservice
+            context: src/paymentservice
+            dockerfile: Dockerfile
+          - name: productcatalogservice
+            context: src/productcatalogservice
+            dockerfile: Dockerfile
+          - name: recommendationservice
+            context: src/recommendationservice
+            dockerfile: Dockerfile
+          - name: shippingservice
+            context: src/shippingservice
+            dockerfile: Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.context }}/${{ matrix.service.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service.name }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service.name }}:latest
+
+  deploy-to-minikube:
+    # NOTE: This requires a self-hosted runner on the same machine as Minikube (Docker driver)
+    runs-on: [self-hosted, linux, minikube]
+    needs: build-and-push
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify cluster access
+        shell: bash
+        run: |
+          kubectl config current-context
+          kubectl get nodes -o wide
+
+      - name: Deploy base manifests
+        shell: bash
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -n online-boutique -f k8s/10-redis.yaml
+          kubectl apply -n online-boutique -f k8s/20-services.yaml
+          kubectl apply -n online-boutique -f k8s/30-deployments.yaml
+          kubectl apply -n online-boutique -f k8s/40-ingress.yaml
+
+      - name: Pin images to commit SHA
+        env:
+          SHA: ${{ github.sha }}
+          OWNER: ${{ github.repository_owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ns=online-boutique
+          base="ghcr.io/${OWNER}/${IMAGE_NAMESPACE}"
+          kubectl -n $ns set image deployment/adservice server=${base}/adservice:${SHA}
+          kubectl -n $ns set image deployment/cartservice server=${base}/cartservice:${SHA}
+          kubectl -n $ns set image deployment/checkoutservice server=${base}/checkoutservice:${SHA}
+          kubectl -n $ns set image deployment/currencyservice server=${base}/currencyservice:${SHA}
+          kubectl -n $ns set image deployment/emailservice server=${base}/emailservice:${SHA}
+          kubectl -n $ns set image deployment/frontend server=${base}/frontend:${SHA}
+          kubectl -n $ns set image deployment/loadgenerator main=${base}/loadgenerator:${SHA}
+          kubectl -n $ns set image deployment/paymentservice server=${base}/paymentservice:${SHA}
+          kubectl -n $ns set image deployment/productcatalogservice server=${base}/productcatalogservice:${SHA}
+          kubectl -n $ns set image deployment/recommendationservice server=${base}/recommendationservice:${SHA}
+          kubectl -n $ns set image deployment/shippingservice server=${base}/shippingservice:${SHA}
+
+      - name: Wait for rollout
+        shell: bash
+        run: |
+          kubectl -n online-boutique rollout status deploy/redis-cart --timeout=180s || true
+          kubectl -n online-boutique rollout status deploy/adservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/cartservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/checkoutservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/currencyservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/emailservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/frontend --timeout=300s
+          kubectl -n online-boutique rollout status deploy/paymentservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/productcatalogservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/recommendationservice --timeout=300s
+          kubectl -n online-boutique rollout status deploy/shippingservice --timeout=300s
+
